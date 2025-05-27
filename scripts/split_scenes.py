@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
 
 """
-Split video into scenes using PySceneDetect.
+Split videos into scenes using PySceneDetect.
 
 This script provides a command-line interface for splitting videos into scenes using various detection algorithms.
 It supports multiple detection methods, preview image generation, and customizable parameters for fine-tuning
 the scene detection process.
 
 Basic usage:
-    # Split video using default content-based detection
-    scenes_split.py input.mp4 output_dir/
+    # Split all videos in a directory using default content-based detection
+    scenes_split.py input_dir/ output_dir/
 
     # Save 3 preview images per scene
-    scenes_split.py input.mp4 output_dir/ --save-images 3
+    scenes_split.py input_dir/ output_dir/ --save-images 3
 
     # Process specific duration and filter short scenes
-    scenes_split.py input.mp4 output_dir/ --duration 60s --filter-shorter-than 2s
+    scenes_split.py input_dir/ output_dir/ --duration 60s --filter-shorter-than 2s
 
 Advanced usage:
     # Content detection with minimum scene length and frame skip
-    scenes_split.py input.mp4 output_dir/ --detector content --min-scene-length 30 --frame-skip 2
+    scenes_split.py input_dir/ output_dir/ --detector content --min-scene-length 30 --frame-skip 2
 
     # Use adaptive detection with custom detector and detector parameters
-    scenes_split.py input.mp4 output_dir/ --detector adaptive --threshold 3.0 --adaptive-window 10
+    scenes_split.py input_dir/ output_dir/ --detector adaptive --threshold 3.0 --adaptive-window 10
 """
 
+import os
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -44,7 +45,22 @@ from scenedetect.scene_manager import save_images as save_scene_images
 from scenedetect.stats_manager import StatsManager
 from scenedetect.video_splitter import split_video_ffmpeg
 
-app = typer.Typer(help="Split video into scenes using PySceneDetect.")
+app = typer.Typer(help="Split videos into scenes using PySceneDetect.")
+
+# Common video file extensions
+VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".mkv",
+    ".wmv",
+    ".flv",
+    ".webm",
+    ".m4v",
+    ".mpg",
+    ".mpeg",
+    ".3gp",
+}
 
 
 class DetectorType(str, Enum):
@@ -53,7 +69,9 @@ class DetectorType(str, Enum):
     CONTENT = "content"  # Detects fast cuts using HSV color space
     ADAPTIVE = "adaptive"  # Detects fast two-phase cuts
     THRESHOLD = "threshold"  # Detects fast cuts/slow fades in from and out to a given threshold level
-    HISTOGRAM = "histogram"  # Detects based on YUV histogram differences in adjacent frames
+    HISTOGRAM = (
+        "histogram"  # Detects based on YUV histogram differences in adjacent frames
+    )
 
 
 def create_detector(
@@ -164,6 +182,38 @@ def parse_timecode(video: any, time_str: Optional[str]) -> Optional[FrameTimecod
         ) from e
 
 
+def get_video_files(input_dir: Path) -> List[Path]:
+    """Get all video files from the input directory.
+
+    Args:
+        input_dir: Path to the input directory
+
+    Returns:
+        List of video file paths
+    """
+    video_files = []
+    for file_path in input_dir.iterdir():
+        if file_path.is_file() and file_path.suffix.lower() in VIDEO_EXTENSIONS:
+            video_files.append(file_path)
+
+    return sorted(video_files)  # Sort for consistent processing order
+
+
+def create_video_output_dir(output_dir: Path, video_name: str) -> Path:
+    """Create a subdirectory for a specific video's output.
+
+    Args:
+        output_dir: Base output directory
+        video_name: Name of the video (without extension)
+
+    Returns:
+        Path to the video-specific output directory
+    """
+    video_output_dir = output_dir / video_name
+    video_output_dir.mkdir(parents=True, exist_ok=True)
+    return video_output_dir
+
+
 def detect_and_split_scenes(  # noqa: PLR0913
     video_path: str,
     output_dir: Path,
@@ -259,7 +309,8 @@ def detect_and_split_scenes(  # noqa: PLR0913
         scenes = [
             (start, end)
             for start, end in scenes
-            if (end.get_frames() - start.get_frames()) >= filter_shorter_than_tc.get_frames()
+            if (end.get_frames() - start.get_frames())
+            >= filter_shorter_than_tc.get_frames()
         ]
         if len(scenes) < original_count:
             typer.echo(
@@ -270,7 +321,9 @@ def detect_and_split_scenes(  # noqa: PLR0913
 
     # Apply max scenes limit if specified
     if max_scenes and len(scenes) > max_scenes:
-        typer.echo(f"Dropping last {len(scenes) - max_scenes} scenes to meet max_scenes ({max_scenes}) limit")
+        typer.echo(
+            f"Dropping last {len(scenes) - max_scenes} scenes to meet max_scenes ({max_scenes}) limit"
+        )
         scenes = scenes[:max_scenes]
 
     # Print scene information
@@ -288,16 +341,13 @@ def detect_and_split_scenes(  # noqa: PLR0913
 
     # Split video into scenes
     typer.echo("Splitting video into scenes...")
-    try:
-        split_video_ffmpeg(
-            input_video_path=video_path,
-            scene_list=scenes,
-            output_dir=output_dir,
-            show_progress=True,
-        )
-        typer.echo(f"Scenes have been saved to: {output_dir}")
-    except Exception as e:
-        raise typer.BadParameter(f"Error splitting video: {e}") from e
+    split_video_ffmpeg(
+        input_video_path=video_path,
+        scene_list=scenes,
+        output_dir=output_dir,
+        show_progress=True,
+    )
+    typer.echo(f"Scenes have been saved to: {output_dir}")
 
     # Save preview images if requested
     if save_images_per_scene > 0:
@@ -322,13 +372,88 @@ def detect_and_split_scenes(  # noqa: PLR0913
     return scenes
 
 
+def process_single_video(  # noqa: PLR0913
+    video_path: Path,
+    output_dir: Path,
+    detector_type: DetectorType,
+    threshold: Optional[float] = None,
+    min_scene_len: Optional[int] = None,
+    max_scenes: Optional[int] = None,
+    filter_shorter_than: Optional[str] = None,
+    skip_start: Optional[int] = None,
+    skip_end: Optional[int] = None,
+    save_images_per_scene: int = 0,
+    stats_file_prefix: Optional[str] = None,
+    luma_only: bool = False,
+    adaptive_window: Optional[int] = None,
+    fade_bias: Optional[float] = None,
+    downscale_factor: Optional[int] = None,
+    frame_skip: int = 0,
+    duration: Optional[str] = None,
+) -> bool:
+    """Process a single video file with error handling.
+
+    Args:
+        video_path: Path to the video file
+        output_dir: Base output directory
+        stats_file_prefix: Prefix for stats file (video name will be appended)
+        ... (other args same as detect_and_split_scenes)
+
+    Returns:
+        True if processing succeeded, False if it failed
+    """
+    video_name = video_path.stem
+    typer.echo(f"\n{'='*60}")
+    typer.echo(f"Processing video: {video_path.name}")
+    typer.echo(f"{'='*60}")
+
+    try:
+        # Create video-specific output directory
+        video_output_dir = create_video_output_dir(output_dir, video_name)
+
+        # Create stats file path if requested
+        stats_file = None
+        if stats_file_prefix:
+            stats_file = f"{stats_file_prefix}_{video_name}.csv"
+
+        # Process the video
+        scenes = detect_and_split_scenes(
+            video_path=str(video_path),
+            output_dir=video_output_dir,
+            detector_type=detector_type,
+            threshold=threshold,
+            min_scene_len=min_scene_len,
+            max_scenes=max_scenes,
+            filter_shorter_than=filter_shorter_than,
+            skip_start=skip_start,
+            skip_end=skip_end,
+            duration=duration,
+            save_images_per_scene=save_images_per_scene,
+            stats_file=stats_file,
+            luma_only=luma_only,
+            adaptive_window=adaptive_window,
+            fade_bias=fade_bias,
+            downscale_factor=downscale_factor,
+            frame_skip=frame_skip,
+        )
+
+        typer.echo(
+            f"✅ Successfully processed {video_path.name} - {len(scenes)} scenes created"
+        )
+        return True
+
+    except Exception as e:
+        typer.echo(f"❌ Error processing {video_path.name}: {str(e)}", err=True)
+        typer.echo(f"Continuing with next video...", err=True)
+        return False
+
+
 @app.command()
 def main(  # noqa: PLR0913
-    video_path: Path = typer.Argument(  # noqa: B008
+    input_path: Path = typer.Argument(  # noqa: B008
         ...,
-        help="Path to the input video file",
+        help="Path to the input video file or directory containing video files",
         exists=True,
-        dir_okay=False,
     ),
     output_dir: str = typer.Argument(
         ...,
@@ -344,7 +469,7 @@ def main(  # noqa: PLR0913
     ),
     max_scenes: Optional[int] = typer.Option(
         None,
-        help="Maximum number of scenes to produce",
+        help="Maximum number of scenes to produce per video",
     ),
     min_scene_length: Optional[int] = typer.Option(
         None,
@@ -358,25 +483,25 @@ def main(  # noqa: PLR0913
     ),
     skip_start: Optional[int] = typer.Option(
         None,
-        help="Number of frames to skip at the start of the video",
+        help="Number of frames to skip at the start of each video",
     ),
     skip_end: Optional[int] = typer.Option(
         None,
-        help="Number of frames to skip at the end of the video",
+        help="Number of frames to skip at the end of each video",
     ),
     duration: Optional[str] = typer.Option(
         None,
         "-d",
-        help="How much of the video to process. Can be specified as frames (123), "
+        help="How much of each video to process. Can be specified as frames (123), "
         "seconds (123s/123.45s), or timecode (HH:MM:SS[.nnn])",
     ),
     save_images: int = typer.Option(
         0,
         help="Number of preview images to save per scene (0 to disable)",
     ),
-    stats_file: Optional[str] = typer.Option(
+    stats_file_prefix: Optional[str] = typer.Option(
         None,
-        help="Path to save detection statistics CSV",
+        help="Prefix for detection statistics CSV files (video name will be appended)",
     ),
     luma_only: bool = typer.Option(
         False,
@@ -399,7 +524,12 @@ def main(  # noqa: PLR0913
         help="Number of frames to skip during processing",
     ),
 ) -> None:
-    """Split video into scenes using PySceneDetect."""
+    """Split videos into scenes using PySceneDetect.
+
+    Can process either a single video file or all video files in a directory.
+    When processing a directory, each video's output will be saved in a subdirectory
+    named after the video file.
+    """
     if skip_start or skip_end:
         typer.echo("Skipping start and end frames is not supported yet.")
         return
@@ -407,26 +537,76 @@ def main(  # noqa: PLR0913
     # Validate output directory
     output_path = validate_output_dir(output_dir)
 
-    # Detect and split scenes
-    detect_and_split_scenes(
-        video_path=str(video_path),
-        output_dir=output_path,
-        detector_type=detector,
-        threshold=threshold,
-        min_scene_len=min_scene_length,
-        max_scenes=max_scenes,
-        filter_shorter_than=filter_shorter_than,
-        skip_start=skip_start,
-        skip_end=skip_end,
-        duration=duration,
-        save_images_per_scene=save_images,
-        stats_file=stats_file,
-        luma_only=luma_only,
-        adaptive_window=adaptive_window,
-        fade_bias=fade_bias,
-        downscale_factor=downscale,
-        frame_skip=frame_skip,
-    )
+    # Determine if input is a file or directory
+    if input_path.is_file():
+        # Single file mode (backward compatibility)
+        if input_path.suffix.lower() not in VIDEO_EXTENSIONS:
+            typer.echo(
+                f"Error: {input_path} does not appear to be a video file", err=True
+            )
+            raise typer.Exit(1)
+
+        video_files = [input_path]
+        typer.echo(f"Processing single video file: {input_path}")
+    elif input_path.is_dir():
+        # Directory mode
+        video_files = get_video_files(input_path)
+        if not video_files:
+            typer.echo(f"No video files found in directory: {input_path}", err=True)
+            raise typer.Exit(1)
+
+        typer.echo(f"Found {len(video_files)} video files in {input_path}")
+        for video_file in video_files:
+            typer.echo(f"  - {video_file.name}")
+    else:
+        typer.echo(f"Error: {input_path} is neither a file nor a directory", err=True)
+        raise typer.Exit(1)
+
+    # Process all video files
+    successful_count = 0
+    failed_count = 0
+
+    for video_file in video_files:
+        success = process_single_video(
+            video_path=video_file,
+            output_dir=output_path,
+            detector_type=detector,
+            threshold=threshold,
+            min_scene_len=min_scene_length,
+            max_scenes=max_scenes,
+            filter_shorter_than=filter_shorter_than,
+            skip_start=skip_start,
+            skip_end=skip_end,
+            duration=duration,
+            save_images_per_scene=save_images,
+            stats_file_prefix=stats_file_prefix,
+            luma_only=luma_only,
+            adaptive_window=adaptive_window,
+            fade_bias=fade_bias,
+            downscale_factor=downscale,
+            frame_skip=frame_skip,
+        )
+
+        if success:
+            successful_count += 1
+        else:
+            failed_count += 1
+
+    # Print summary
+    typer.echo(f"\n{'='*60}")
+    typer.echo("PROCESSING SUMMARY")
+    typer.echo(f"{'='*60}")
+    typer.echo(f"Total videos processed: {len(video_files)}")
+    typer.echo(f"Successful: {successful_count}")
+    typer.echo(f"Failed: {failed_count}")
+
+    if failed_count > 0:
+        typer.echo(
+            f"\n⚠️  {failed_count} video(s) failed to process. Check the error messages above."
+        )
+        raise typer.Exit(1)
+    else:
+        typer.echo(f"\n🎉 All videos processed successfully!")
 
 
 if __name__ == "__main__":
