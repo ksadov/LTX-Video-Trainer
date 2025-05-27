@@ -1,7 +1,14 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from ltxv_trainer.model_loader import LtxvModelVersion
 from ltxv_trainer.quantization import QuantizationOptions
@@ -189,10 +196,14 @@ class ValidationConfig(ConfigBaseModel):
         description="Negative prompt to use for validation examples",
     )
 
-    images: list[str] | None = Field(
+    images: list[str] | list[list[str]] | None = Field(
         default=None,
         description="List of image paths to use for validation. "
         "One image path must be provided for each validation prompt",
+    )
+
+    frame_indexes: list[list[int]] | None = Field(
+        default=None, description="List of frame indexes to use for validation. "
     )
 
     video_dims: tuple[int, int, int] = Field(
@@ -231,11 +242,15 @@ class ValidationConfig(ConfigBaseModel):
 
     @field_validator("images")
     @classmethod
-    def validate_num_images(cls, v: list[str] | None, info: ValidationInfo) -> list[str] | None:
+    def validate_num_images(
+        cls, v: list[str] | None, info: ValidationInfo
+    ) -> list[str] | None:
         """Validate that number of images (if provided) matches number of prompts."""
         num_prompts = len(info.data.get("prompts", []))
         if v is not None and len(v) != num_prompts:
-            raise ValueError(f"Number of images ({len(v)}) must match number of prompts ({num_prompts})")
+            raise ValueError(
+                f"Number of images ({len(v)}) must match number of prompts ({num_prompts})"
+            )
         return v
 
 
@@ -258,9 +273,13 @@ class CheckpointsConfig(ConfigBaseModel):
 class HubConfig(ConfigBaseModel):
     """Configuration for Hugging Face Hub integration"""
 
-    push_to_hub: bool = Field(default=False, description="Whether to push the model weights to the Hugging Face Hub")
+    push_to_hub: bool = Field(
+        default=False,
+        description="Whether to push the model weights to the Hugging Face Hub",
+    )
     hub_model_id: str | None = Field(
-        default=None, description="Hugging Face Hub repository ID (e.g., 'username/repo-name')"
+        default=None,
+        description="Hugging Face Hub repository ID (e.g., 'username/repo-name')",
     )
 
     @model_validator(mode="after")

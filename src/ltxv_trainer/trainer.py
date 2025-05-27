@@ -49,6 +49,9 @@ from ltxv_trainer.config import LtxvTrainerConfig
 from ltxv_trainer.datasets import PrecomputedDataset
 from ltxv_trainer.hf_hub_utils import push_to_hub
 from ltxv_trainer.model_loader import load_ltxv_components
+from ltxv_trainer.patched_condition_pipeline import (
+    PatchedConditionPipeline,
+)
 from ltxv_trainer.quantization import quantize_model
 from ltxv_trainer.timestep_samplers import SAMPLERS
 from ltxv_trainer.utils import get_gpu_memory_gb, open_image_as_srgb
@@ -58,7 +61,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 # Silence bitsandbytes warnings about casting
 warnings.filterwarnings(
-    "ignore", message="MatMul8bitLt: inputs will be cast from torch.bfloat16 to float16 during quantization"
+    "ignore",
+    message="MatMul8bitLt: inputs will be cast from torch.bfloat16 to float16 during quantization",
 )
 
 # Disable progress bars if not main process
@@ -68,7 +72,9 @@ if not IS_MAIN_PROCESS:
 
     disable_progress_bar()
 
-StepCallback = Callable[[int, int, list[Path]], None]  # (step, total, list[sampled_video_path]) -> None
+StepCallback = Callable[
+    [int, int, list[Path]], None
+]  # (step, total, list[sampled_video_path]) -> None
 
 COMPILE_WARMUP_STEPS = 5
 MEMORY_CHECK_INTERVAL = 200
@@ -119,7 +125,9 @@ class LtxvTrainer:
 
         # Use the same seed for all processes and ensure deterministic operations
         set_seed(cfg.seed)
-        logger.debug(f"Process {self._accelerator.process_index} using seed: {cfg.seed}")
+        logger.debug(
+            f"Process {self._accelerator.process_index} using seed: {cfg.seed}"
+        )
 
         if cfg.model.training_mode == "lora" and not cfg.model.load_checkpoint:
             self._init_lora_weights()
@@ -142,7 +150,9 @@ class LtxvTrainer:
             sample_progress = MagicMock()
             live = nullcontext()
             if IS_MAIN_PROCESS:
-                logger.warning("Progress bars disabled. Status messages will be printed occasionally instead.")
+                logger.warning(
+                    "Progress bars disabled. Status messages will be printed occasionally instead."
+                )
         else:
             train_progress = Progress(
                 TextColumn("Training Step"),
@@ -166,7 +176,9 @@ class LtxvTrainer:
                 TimeRemainingColumn(compact=True),
             )
 
-            live = Live(Panel(Group(train_progress, sample_progress)), refresh_per_second=2)
+            live = Live(
+                Panel(Group(train_progress, sample_progress)), refresh_per_second=2
+            )
 
         self._transformer.train()
         self._global_step = 0
@@ -202,22 +214,33 @@ class LtxvTrainer:
                     batch = next(data_iter)
 
                 # Measure compilation time (first COMPILE_WARMUP_STEPS steps)
-                if step == COMPILE_WARMUP_STEPS and cfg.acceleration.compile_with_inductor:
+                if (
+                    step == COMPILE_WARMUP_STEPS
+                    and cfg.acceleration.compile_with_inductor
+                ):
                     compilation_time = time.time() - train_start_time
                     actual_training_start = time.time()
-                elif step == COMPILE_WARMUP_STEPS and not cfg.acceleration.compile_with_inductor:
+                elif (
+                    step == COMPILE_WARMUP_STEPS
+                    and not cfg.acceleration.compile_with_inductor
+                ):
                     actual_training_start = train_start_time
 
                 step_start_time = time.time()
                 with self._accelerator.accumulate(self._transformer):
-                    is_optimization_step = (step + 1) % cfg.optimization.gradient_accumulation_steps == 0
+                    is_optimization_step = (
+                        step + 1
+                    ) % cfg.optimization.gradient_accumulation_steps == 0
                     if is_optimization_step:
                         self._global_step += 1
 
                     loss = self._training_step(batch)
                     self._accelerator.backward(loss)
 
-                    if self._accelerator.sync_gradients and cfg.optimization.max_grad_norm > 0:
+                    if (
+                        self._accelerator.sync_gradients
+                        and cfg.optimization.max_grad_norm > 0
+                    ):
                         self._accelerator.clip_grad_norm_(
                             self._trainable_params,
                             cfg.optimization.max_grad_norm,
@@ -252,7 +275,11 @@ class LtxvTrainer:
 
                     # Call step callback if provided
                     if step_callback and is_optimization_step:
-                        step_callback(self._global_step, cfg.optimization.steps, sampled_videos_paths)
+                        step_callback(
+                            self._global_step,
+                            cfg.optimization.steps,
+                            sampled_videos_paths,
+                        )
 
                     self._accelerator.wait_for_everyone()
 
@@ -286,7 +313,9 @@ class LtxvTrainer:
                     # Sample GPU memory periodically
                     if step % MEMORY_CHECK_INTERVAL == 0:
                         current_mem = get_gpu_memory_gb(device)
-                        peak_mem_during_training = max(peak_mem_during_training, current_mem)
+                        peak_mem_during_training = max(
+                            peak_mem_during_training, current_mem
+                        )
 
         # Collect final stats
         train_end_time = time.time()
@@ -296,12 +325,18 @@ class LtxvTrainer:
         # Calculate steps/second excluding compilation time if needed
         if cfg.acceleration.compile_with_inductor:
             training_time = train_end_time - actual_training_start
-            steps_per_second = (cfg.optimization.steps - COMPILE_WARMUP_STEPS) / training_time
+            steps_per_second = (
+                cfg.optimization.steps - COMPILE_WARMUP_STEPS
+            ) / training_time
         else:
             training_time = train_end_time - train_start_time
             steps_per_second = cfg.optimization.steps / training_time
 
-        samples_per_second = steps_per_second * self._accelerator.num_processes * cfg.optimization.batch_size
+        samples_per_second = (
+            steps_per_second
+            * self._accelerator.num_processes
+            * cfg.optimization.batch_size
+        )
 
         stats = TrainingStats(
             total_time_seconds=train_end_time - train_start_time,
@@ -311,7 +346,8 @@ class LtxvTrainer:
             samples_per_second=samples_per_second,
             peak_gpu_memory_gb=peak_mem,
             num_processes=self._accelerator.num_processes,
-            global_batch_size=cfg.optimization.batch_size * self._accelerator.num_processes,
+            global_batch_size=cfg.optimization.batch_size
+            * self._accelerator.num_processes,
         )
 
         train_progress.remove_task(task)
@@ -378,8 +414,12 @@ class LtxvTrainer:
             # if we only have one frame (e.g. when training on still images),
             # skip this step otherwise we have no target to train on.
             if first_frame_end_idx < packed_latents.shape[1]:
-                sigmas[:, :first_frame_end_idx] = 1e-5  # Small sigma close to 0 for the first frame.
-                loss_mask[:, :first_frame_end_idx] = 0.0  # Mask out the loss for the first frame.
+                sigmas[:, :first_frame_end_idx] = (
+                    1e-5  # Small sigma close to 0 for the first frame.
+                )
+                loss_mask[:, :first_frame_end_idx] = (
+                    0.0  # Mask out the loss for the first frame.
+                )
                 # TODO: the `timesteps` fed to the transformer should be
                 #  adjusted to reflect zero noise level for the first latent.
 
@@ -388,7 +428,11 @@ class LtxvTrainer:
 
         latent_frame_rate = fps / 8
         spatial_compression_ratio = 32
-        rope_interpolation_scale = [1 / latent_frame_rate, spatial_compression_ratio, spatial_compression_ratio]
+        rope_interpolation_scale = [
+            1 / latent_frame_rate,
+            spatial_compression_ratio,
+            spatial_compression_ratio,
+        ]
 
         model_pred = self._transformer(
             hidden_states=noisy_latents,
@@ -403,7 +447,9 @@ class LtxvTrainer:
         )[0]
 
         loss = (model_pred - targets).pow(2)
-        loss = loss.mul(loss_mask).div(loss_mask.mean())  # divide by mean to keep the loss scale unchanged.
+        loss = loss.mul(loss_mask).div(
+            loss_mask.mean()
+        )  # divide by mean to keep the loss scale unchanged.
         return loss.mean()
 
     def _print_config(self, config: BaseModel) -> None:
@@ -413,7 +459,11 @@ class LtxvTrainer:
 
         from rich.table import Table
 
-        table = Table(title="⚙️ Training Configuration", show_header=True, header_style="bold green")
+        table = Table(
+            title="⚙️ Training Configuration",
+            show_header=True,
+            header_style="bold green",
+        )
         table.add_column("Parameter", style="bold white")
         table.add_column("Value", style="bold cyan")
 
@@ -441,7 +491,11 @@ class LtxvTrainer:
         """Load the LTXV model components."""
 
         # Load all model components using the new loader
-        transformer_dtype = torch.bfloat16 if self._config.model.training_mode == "lora" else torch.float32
+        transformer_dtype = (
+            torch.bfloat16
+            if self._config.model.training_mode == "lora"
+            else torch.float32
+        )
         components = load_ltxv_components(
             model_source=self._config.model.model_source,
             load_text_encoder_in_8bit=self._config.acceleration.load_text_encoder_in_8bit,
@@ -460,7 +514,9 @@ class LtxvTrainer:
             if self._config.model.training_mode == "full":
                 raise ValueError("Quantization is not supported in full training mode.")
 
-            logger.warning(f"Quantizing model with precision: {self._config.acceleration.quantization}")
+            logger.warning(
+                f"Quantizing model with precision: {self._config.acceleration.quantization}"
+            )
             self._transformer = quantize_model(
                 self._transformer,
                 precision=self._config.acceleration.quantization,
@@ -481,7 +537,9 @@ class LtxvTrainer:
         torch._dynamo.config.inline_inbuilt_nn_modules = True
         torch._dynamo.config.cache_size_limit = 128
 
-        compile_module = partial(torch.compile, mode=self._config.acceleration.compilation_mode)
+        compile_module = partial(
+            torch.compile, mode=self._config.acceleration.compilation_mode
+        )
         self._transformer.transformer_blocks = nn.ModuleList(
             [compile_module(block) for block in self._transformer.transformer_blocks],
         )
@@ -495,15 +553,23 @@ class LtxvTrainer:
             # For full training, unfreeze all transformer parameters
             self._transformer.requires_grad_(True)
         else:
-            raise ValueError(f"Unknown training mode: {self._config.model.training_mode}")
+            raise ValueError(
+                f"Unknown training mode: {self._config.model.training_mode}"
+            )
 
-        self._trainable_params = [p for p in self._transformer.parameters() if p.requires_grad]
-        logger.debug(f"Trainable params count: {sum(p.numel() for p in self._trainable_params):,}")
+        self._trainable_params = [
+            p for p in self._transformer.parameters() if p.requires_grad
+        ]
+        logger.debug(
+            f"Trainable params count: {sum(p.numel() for p in self._trainable_params):,}"
+        )
 
     def _init_timestep_sampler(self) -> None:
         """Initialize the timestep sampler based on the config."""
         sampler_cls = SAMPLERS[self._config.flow_matching.timestep_sampling_mode]
-        self._timestep_sampler = sampler_cls(**self._config.flow_matching.timestep_sampling_params)
+        self._timestep_sampler = sampler_cls(
+            **self._config.flow_matching.timestep_sampling_params
+        )
 
     def _setup_lora(self) -> None:
         """Configure LoRA adapters for the transformer. Only called in LoRA training mode."""
@@ -524,7 +590,9 @@ class LtxvTrainer:
 
         checkpoint_path = self._find_checkpoint(self._config.model.load_checkpoint)
         if not checkpoint_path:
-            logger.warning(f"⚠️ Could not find checkpoint at {self._config.model.load_checkpoint}")
+            logger.warning(
+                f"⚠️ Could not find checkpoint at {self._config.model.load_checkpoint}"
+            )
             return
 
         transformer = self._accelerator.unwrap_model(self._transformer)
@@ -536,9 +604,17 @@ class LtxvTrainer:
             transformer.load_state_dict(state_dict)
         else:  # LoRA mode
             # Adjust layer names to match PEFT format
-            state_dict = {k.replace("transformer.", "", 1): v for k, v in state_dict.items()}
-            state_dict = {k.replace("lora_A", "lora_A.default", 1): v for k, v in state_dict.items()}
-            state_dict = {k.replace("lora_B", "lora_B.default", 1): v for k, v in state_dict.items()}
+            state_dict = {
+                k.replace("transformer.", "", 1): v for k, v in state_dict.items()
+            }
+            state_dict = {
+                k.replace("lora_A", "lora_A.default", 1): v
+                for k, v in state_dict.items()
+            }
+            state_dict = {
+                k.replace("lora_B", "lora_B.default", 1): v
+                for k, v in state_dict.items()
+            }
 
             # Load LoRA weights and verify all weights were loaded
             _, unexpected_keys = transformer.load_state_dict(state_dict, strict=False)
@@ -566,7 +642,9 @@ class LtxvTrainer:
 
         if checkpoint_path.is_file():
             if not checkpoint_path.suffix == ".safetensors":
-                raise ValueError(f"Checkpoint file must have a .safetensors extension: {checkpoint_path}")
+                raise ValueError(
+                    f"Checkpoint file must have a .safetensors extension: {checkpoint_path}"
+                )
             return checkpoint_path
 
         if checkpoint_path.is_dir():
@@ -587,7 +665,9 @@ class LtxvTrainer:
             return latest
 
         else:
-            raise ValueError(f"Invalid checkpoint path: {checkpoint_path}. Must be a file or directory.")
+            raise ValueError(
+                f"Invalid checkpoint path: {checkpoint_path}. Must be a file or directory."
+            )
 
     def _init_dataloader(self) -> None:
         """Initialize the training data loader."""
@@ -612,7 +692,9 @@ class LtxvTrainer:
         logger.debug("Initializing LoRA weights...")
         for _, module in self._transformer.named_modules():
             if isinstance(module, (BaseTunerLayer, ModulesToSaveWrapper)):
-                module.reset_lora_parameters(adapter_name="default", init_lora_weights=True)
+                module.reset_lora_parameters(
+                    adapter_name="default", init_lora_weights=True
+                )
 
     def _init_optimizer(self) -> None:
         """Initialize the optimizer and learning rate scheduler."""
@@ -633,7 +715,9 @@ class LtxvTrainer:
         lr_scheduler = self._create_scheduler(optimizer)
 
         # noinspection PyTypeChecker
-        self._optimizer, self._lr_scheduler = self._accelerator.prepare(optimizer, lr_scheduler)
+        self._optimizer, self._lr_scheduler = self._accelerator.prepare(
+            optimizer, lr_scheduler
+        )
 
     def _create_scheduler(self, optimizer: torch.optim.Optimizer) -> LRScheduler | None:
         """Create learning rate scheduler based on config."""
@@ -663,7 +747,9 @@ class LtxvTrainer:
             scheduler = CosineAnnealingWarmRestarts(
                 optimizer,
                 T_0=params.pop("T_0", steps // 4),  # First restart cycle length
-                T_mult=params.pop("T_mult", 1),  # Multiplicative factor for cycle lengths
+                T_mult=params.pop(
+                    "T_mult", 1
+                ),  # Multiplicative factor for cycle lengths
                 eta_min=params.pop("eta_min", 5e-5),
                 **params,
             )
@@ -697,9 +783,13 @@ class LtxvTrainer:
 
         # Log information about distributed training
         if self._accelerator.num_processes > 1:
-            logger.info(f"Distributed training enabled with {self._accelerator.num_processes} processes")
+            logger.info(
+                f"Distributed training enabled with {self._accelerator.num_processes} processes"
+            )
             logger.info(f"Local batch size: {self._config.optimization.batch_size}")
-            logger.info(f"Global batch size: {self._config.optimization.batch_size * self._accelerator.num_processes}")
+            logger.info(
+                f"Global batch size: {self._config.optimization.batch_size * self._accelerator.num_processes}"
+            )
 
     @torch.no_grad()
     @torch.compiler.set_stance("force_eager")
@@ -711,9 +801,19 @@ class LtxvTrainer:
         if not self._config.acceleration.load_text_encoder_in_8bit:
             self._text_encoder.to(self._accelerator.device)
 
-        use_images = self._config.validation.images is not None
+        use_frame_indexes = self._config.validation.frame_indexes is not None
 
-        pipeline_class = LTXImageToVideoPipeline if use_images else LTXPipeline
+        use_images = (
+            self._config.validation.images is not None and not use_frame_indexes
+        )
+
+        if use_frame_indexes:
+            pipeline_class = PatchedConditionPipeline
+        elif use_images:
+            pipeline_class = LTXImageToVideoPipeline
+        else:
+            pipeline_class = LTXPipeline
+
         pipeline = pipeline_class(
             scheduler=deepcopy(self._scheduler),
             vae=self._accelerator.unwrap_model(self._vae),
@@ -735,7 +835,9 @@ class LtxvTrainer:
         video_paths = []
         i = 0
         for j, prompt in enumerate(self._config.validation.prompts):
-            generator = torch.Generator(device=self._accelerator.device).manual_seed(self._config.validation.seed)
+            generator = torch.Generator(device=self._accelerator.device).manual_seed(
+                self._config.validation.seed
+            )
 
             # Generate video
             width, height, frames = self._config.validation.video_dims
@@ -750,7 +852,15 @@ class LtxvTrainer:
                 "generator": generator,
             }
 
-            if use_images:
+            if use_frame_indexes:
+                pipeline_inputs["image"] = [
+                    open_image_as_srgb(image_path)
+                    for image_path in self._config.validation.images[j]
+                ]
+                pipeline_inputs["frame_index"] = 0
+                # pipeline.scheduler.config.use_dynamic_shifting = False
+
+            elif use_images:
                 image_path = self._config.validation.images[j]
                 pipeline_inputs["image"] = open_image_as_srgb(image_path)
 
@@ -773,7 +883,9 @@ class LtxvTrainer:
             self._text_encoder.to("cpu")
 
         rel_outputs_path = output_dir.relative_to(self._config.output_dir)
-        logger.info(f"🎥 Validation samples for step {self._global_step} saved in {rel_outputs_path}")
+        logger.info(
+            f"🎥 Validation samples for step {self._global_step} saved in {rel_outputs_path}"
+        )
         return video_paths
 
     @staticmethod
@@ -788,7 +900,9 @@ class LtxvTrainer:
             f" - Peak GPU memory: {stats.peak_gpu_memory_gb:.2f} GB"
         )
         if stats.compilation_time_seconds is not None:
-            stats_str += f"\n - Compilation time: {stats.compilation_time_seconds:.1f} seconds\n"
+            stats_str += (
+                f"\n - Compilation time: {stats.compilation_time_seconds:.1f} seconds\n"
+            )
         if stats.num_processes > 1:
             stats_str += f"\n - Number of processes: {stats.num_processes}\n"
             stats_str += f" - Global batch size: {stats.global_batch_size}"
@@ -813,7 +927,9 @@ class LtxvTrainer:
         if self._config.model.training_mode == "full":
             state_dict = unwrapped_model.state_dict()
             save_file(state_dict, saved_weights_path)
-            logger.info(f"💾 Model weights for step {self._global_step} saved in {rel_saved_weights_path}")
+            logger.info(
+                f"💾 Model weights for step {self._global_step} saved in {rel_saved_weights_path}"
+            )
         elif self._config.model.training_mode == "lora":
             state_dict = get_peft_model_state_dict(unwrapped_model)
             # Adjust layer names to standard formatting.
@@ -823,9 +939,13 @@ class LtxvTrainer:
                 transformer_lora_layers=state_dict,
                 weight_name=filename,
             )
-            logger.info(f"💾 LoRA weights for step {self._global_step} saved in {rel_saved_weights_path}")
+            logger.info(
+                f"💾 LoRA weights for step {self._global_step} saved in {rel_saved_weights_path}"
+            )
         else:
-            raise ValueError(f"Unknown training mode: {self._config.model.training_mode}")
+            raise ValueError(
+                f"Unknown training mode: {self._config.model.training_mode}"
+            )
 
         # Keep track of checkpoint paths, and cleanup old checkpoints if needed
         self._checkpoint_paths.append(saved_weights_path)
@@ -836,10 +956,14 @@ class LtxvTrainer:
     def _cleanup_checkpoints(self) -> None:
         """Clean up old checkpoints."""
         if 0 < self._config.checkpoints.keep_last_n < len(self._checkpoint_paths):
-            checkpoints_to_remove = self._checkpoint_paths[: -self._config.checkpoints.keep_last_n]
+            checkpoints_to_remove = self._checkpoint_paths[
+                : -self._config.checkpoints.keep_last_n
+            ]
             for old_checkpoint in checkpoints_to_remove:
                 if old_checkpoint.exists():
                     old_checkpoint.unlink()
                     logger.debug(f"Removed old checkpoints: {old_checkpoint}")
             # Update the list to only contain kept checkpoints
-            self._checkpoint_paths = self._checkpoint_paths[-self._config.checkpoints.keep_last_n :]
+            self._checkpoint_paths = self._checkpoint_paths[
+                -self._config.checkpoints.keep_last_n :
+            ]
