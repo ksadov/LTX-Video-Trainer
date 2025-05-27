@@ -7,6 +7,10 @@ This script provides a command-line interface for generating captions for videos
 a vision-language model. It supports processing individual videos or entire directories,
 customizing the captioning model, and saving the results to various formats.
 
+The script includes incremental saving functionality to prevent data loss during long
+processing runs. Results are automatically saved every N processed files (configurable
+via --save-frequency), and existing captions are loaded on restart to resume processing.
+
 The paths to videos in the generated dataset/captions file will be RELATIVE to the
 directory where the output file is stored. This makes the dataset more portable and
 easier to use in different environments.
@@ -27,6 +31,9 @@ Advanced usage:
 
     # Process videos with specific extensions and save as JSON
     caption_videos.py videos_dir/ --extensions mp4,mov,avi --output captions.json
+
+    # Save progress every 5 files for more frequent incremental saves
+    caption_videos.py videos_dir/ --output captions.json --save-frequency 5
 """
 
 import csv
@@ -87,6 +94,7 @@ def caption_media(
     clean_caption: bool,
     output_format: OutputFormat,
     override: bool,
+    save_frequency: int = 10,
 ) -> None:
     """Caption videos and images using the provided captioning model.
     Args:
@@ -99,6 +107,7 @@ def caption_media(
         clean_caption: Whether to clean up captions
         output_format: Format to save the captions in
         override: Whether to override existing captions
+        save_frequency: How often to save results incrementally (number of processed files)
     """
 
     # Get list of media files to process
@@ -112,7 +121,9 @@ def caption_media(
 
     # Get the base directory for relative paths (the directory containing the output file)
     base_dir = output_path.parent.resolve()
-    console.print(f"Using [bold blue]{base_dir}[/] as base directory for relative paths")
+    console.print(
+        f"Using [bold blue]{base_dir}[/] as base directory for relative paths"
+    )
 
     # Load existing captions if the output file exists
     existing_captions = _load_existing_captions(output_path, output_format)
@@ -135,14 +146,21 @@ def caption_media(
             media_to_process.append(media_file)
 
     if skipped_media:
-        console.print(f"[bold yellow]Skipping [bold]{len(skipped_media)}[/] media that already have captions.[/]")
+        console.print(
+            f"[bold yellow]Skipping [bold]{len(skipped_media)}[/] media that already have captions.[/]"
+        )
 
     if not media_to_process:
-        console.print("[bold yellow]No media to process. All media already have captions.[/]")
+        console.print(
+            "[bold yellow]No media to process. All media already have captions.[/]"
+        )
         console.print("[bold yellow]Use --override to recaption all media.[/]")
         return
 
     console.print(f"Processing [bold]{len(media_to_process)}[/] media.")
+    console.print(
+        f"[bold blue]Incremental saves will occur every {save_frequency} processed files.[/]"
+    )
 
     # Create progress bar
     progress = Progress(
@@ -158,13 +176,16 @@ def caption_media(
 
     # Start with existing captions
     captions = existing_captions.copy()
+    processed_count = 0
 
     with progress:
         task = progress.add_task("Generating captions", total=len(media_to_process))
 
         for media_file in media_to_process:
             # Update progress description to show current file
-            progress.update(task, description=f"Captioning [bold blue]{media_file.name}[/]")
+            progress.update(
+                task, description=f"Captioning [bold blue]{media_file.name}[/]"
+            )
 
             try:
                 # Generate caption for the media
@@ -178,14 +199,25 @@ def caption_media(
                 rel_path = str(media_file.resolve().relative_to(base_dir))
                 # Store the caption with the relative path as key
                 captions[rel_path] = caption
+                processed_count += 1
+
+                # Save incrementally if we've processed enough files
+                if processed_count % save_frequency == 0:
+                    progress.update(
+                        task,
+                        description=f"[bold green]Saving progress... ({processed_count} processed)[/]",
+                    )
+                    _save_captions(captions, output_path, output_format, quiet=True)
 
             except Exception as e:
-                console.print(f"[bold red]Error captioning [bold blue]{media_file}[/]: {e}[/]")
+                console.print(
+                    f"[bold red]Error captioning [bold blue]{media_file}[/]: {e}[/]"
+                )
 
             # Advance progress bar
             progress.advance(task)
 
-    # Save captions to file
+    # Final save of all captions
     _save_captions(captions, output_path, output_format)
 
     # Print summary
@@ -211,7 +243,9 @@ def _get_media_files(
         if input_path.suffix.lstrip(".").lower() in extensions:
             return [input_path]
         else:
-            typer.echo(f"Warning: {input_path} is not a recognized media file. Skipping.")
+            typer.echo(
+                f"Warning: {input_path} is not a recognized media file. Skipping."
+            )
             return []
     elif input_path.is_dir():
         # If input is a directory, find all media files
@@ -234,6 +268,7 @@ def _save_captions(
     captions: dict[str, str],
     output_path: Path,
     format_type: OutputFormat,
+    quiet: bool = False,
 ) -> None:
     """Save captions to a file in the specified format.
 
@@ -241,11 +276,13 @@ def _save_captions(
         captions: Dictionary mapping media paths to captions
         output_path: Path to save the output file
         format_type: Format to save the captions in
+        quiet: Whether to suppress console output
     """
     # Create parent directories if they don't exist
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    console.print("[bold blue]Saving captions...[/]")
+    if not quiet:
+        console.print("[bold blue]Saving captions...[/]")
 
     match format_type:
         case OutputFormat.TXT:
@@ -261,11 +298,18 @@ def _save_captions(
                 for media_path in captions:
                     f.write(f"{media_path}\n")
 
-            console.print(f"[bold green]✓[/] Captions saved to [cyan]{captions_file}[/]")
-            console.print(f"[bold green]✓[/] Media paths saved to [cyan]{paths_file}[/]")
-            console.print("[bold yellow]Note:[/] Use these files with ImageOrVideoDataset by setting:")
-            console.print(f"  caption_column='{captions_file.name}'")
-            console.print(f"  video_column='{paths_file.name}'")
+            if not quiet:
+                console.print(
+                    f"[bold green]✓[/] Captions saved to [cyan]{captions_file}[/]"
+                )
+                console.print(
+                    f"[bold green]✓[/] Media paths saved to [cyan]{paths_file}[/]"
+                )
+                console.print(
+                    "[bold yellow]Note:[/] Use these files with ImageOrVideoDataset by setting:"
+                )
+                console.print(f"  caption_column='{captions_file.name}'")
+                console.print(f"  video_column='{paths_file.name}'")
 
         case OutputFormat.CSV:
             with output_path.open("w", encoding="utf-8", newline="") as f:
@@ -274,32 +318,56 @@ def _save_captions(
                 for media_path, caption in captions.items():
                     writer.writerow([caption, media_path])
 
-            console.print(f"[bold green]✓[/] Captions saved to [cyan]{output_path}[/]")
-            console.print("[bold yellow]Note:[/] Use these files with ImageOrVideoDataset by setting:")
-            console.print("  caption_column='[cyan]caption[/]'")
-            console.print("  video_column='[cyan]media_path[/]'")
+            if not quiet:
+                console.print(
+                    f"[bold green]✓[/] Captions saved to [cyan]{output_path}[/]"
+                )
+                console.print(
+                    "[bold yellow]Note:[/] Use these files with ImageOrVideoDataset by setting:"
+                )
+                console.print("  caption_column='[cyan]caption[/]'")
+                console.print("  video_column='[cyan]media_path[/]'")
 
         case OutputFormat.JSON:
             # Format as list of dictionaries with caption and media_path keys
-            json_data = [{"caption": caption, "media_path": media_path} for media_path, caption in captions.items()]
+            json_data = [
+                {"caption": caption, "media_path": media_path}
+                for media_path, caption in captions.items()
+            ]
 
             with output_path.open("w", encoding="utf-8") as f:
                 json.dump(json_data, f, indent=2, ensure_ascii=False)
 
-            console.print(f"[bold green]✓[/] Captions saved to [cyan]{output_path}[/]")
-            console.print("[bold yellow]Note:[/] Use these files with ImageOrVideoDataset by setting:")
-            console.print("  caption_column='[cyan]caption[/]'")
-            console.print("  video_column='[cyan]media_path[/]'")
+            if not quiet:
+                console.print(
+                    f"[bold green]✓[/] Captions saved to [cyan]{output_path}[/]"
+                )
+                console.print(
+                    "[bold yellow]Note:[/] Use these files with ImageOrVideoDataset by setting:"
+                )
+                console.print("  caption_column='[cyan]caption[/]'")
+                console.print("  video_column='[cyan]media_path[/]'")
 
         case OutputFormat.JSONL:
             with output_path.open("w", encoding="utf-8") as f:
                 for media_path, caption in captions.items():
-                    f.write(json.dumps({"caption": caption, "media_path": media_path}, ensure_ascii=False) + "\n")
+                    f.write(
+                        json.dumps(
+                            {"caption": caption, "media_path": media_path},
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
 
-            console.print(f"[bold green]✓[/] Captions saved to [cyan]{output_path}[/]")
-            console.print("[bold yellow]Note:[/] Use these files with ImageOrVideoDataset by setting:")
-            console.print("  caption_column='[cyan]caption[/]'")
-            console.print("  video_column='[cyan]media_path[/]'")
+            if not quiet:
+                console.print(
+                    f"[bold green]✓[/] Captions saved to [cyan]{output_path}[/]"
+                )
+                console.print(
+                    "[bold yellow]Note:[/] Use these files with ImageOrVideoDataset by setting:"
+                )
+                console.print("  caption_column='[cyan]caption[/]'")
+                console.print("  video_column='[cyan]media_path[/]'")
 
         case _:
             raise ValueError(f"Unsupported output format: {format_type}")
@@ -321,7 +389,9 @@ def _load_existing_captions(  # noqa: PLR0912
     if not output_path.exists():
         return {}
 
-    console.print(f"[bold blue]Loading existing captions from [cyan]{output_path}[/]...[/]")
+    console.print(
+        f"[bold blue]Loading existing captions from [cyan]{output_path}[/]...[/]"
+    )
 
     existing_captions = {}
 
@@ -366,7 +436,9 @@ def _load_existing_captions(  # noqa: PLR0912
             case _:
                 raise ValueError(f"Unsupported output format: {format_type}")
 
-        console.print(f"[bold green]✓[/] Loaded [bold]{len(existing_captions)}[/] existing captions")
+        console.print(
+            f"[bold green]✓[/] Loaded [bold]{len(existing_captions)}[/] existing captions"
+        )
         return existing_captions
 
     except Exception as e:
@@ -439,6 +511,13 @@ def main(  # noqa: PLR0913
         "--override",
         help="Whether to override existing captions for media",
     ),
+    save_frequency: int = typer.Option(
+        10,
+        "--save-frequency",
+        "-s",
+        help="How often to save results incrementally (number of processed files)",
+        min=1,
+    ),
 ) -> None:
     """Auto-caption videos and images using vision-language models.
 
@@ -454,6 +533,9 @@ def main(  # noqa: PLR0913
 
         # Caption with custom instruction (especially useful for Qwen)
         caption_videos.py video.mp4 -o captions.txt -c qwen_25_vl -i "Describe this video in detail"
+
+        # Save progress every 5 files instead of default 10
+        caption_videos.py videos/ -o captions.json --save-frequency 5
 
     Valid captioner types:
         qwen_25_vl: Qwen2.5-VL-7B model (default)
@@ -505,6 +587,7 @@ def main(  # noqa: PLR0913
         clean_caption=clean_caption,
         output_format=output_format,
         override=override,
+        save_frequency=save_frequency,
     )
 
 
