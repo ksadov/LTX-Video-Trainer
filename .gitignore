@@ -27,3 +27,5 @@ configs/*.yaml
 !configs/ltxv_2b_lora_low_vram.yaml
 outputs
 *.mov
+# ignore my notes
+notes.txt
